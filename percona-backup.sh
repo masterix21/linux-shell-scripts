@@ -1,116 +1,92 @@
 #!/bin/bash
-#Tue Jul  2 15:32:21 CEST 2013
-#Made by Edward Z.
-set -e #stops execution if a variable is not set
-set -u #stop execution if something goes wrong
+# This is my production backup script.
+# https://sqlgossip.com
+
+set -e 
+set -u  
 
 usage() { 
-        echo "usage: $(basename $0) [option]" 
-        echo "option=full: do a full backup of vinnie /var/lib/mysql using innobackupex."
-        echo "option=incremental: do a incremental backup"
-        echo "option=restore: this will restore the latest backup to vinnie, BE CAREFUL!"
-        echo "option=help: show this help"
+    echo "usage: $(basename $0) [option]" 
+    echo "option=full: Perform Full Backup"
+    echo "option=incremental: Perform Incremental Backup"
+    echo "option=restore: Start to Restore! Be Careful!! "
+    echo "option=help: show this help"
 }
 
 full_backup() {
-        date
-        if [ ! -d $BACKUP_DIR ]
-        then
+    if [ ! -d $BACKUP_DIR ]
+    then
         mkdir $BACKUP_DIR
-                #echo "ERROR: the folder $BACKUP_DIR does not exists"
-                #exit 1
-        fi
-        echo "doing full backup..."
-        echo "cleaning the backup folder..."
-        rm -rf $BACKUP_DIR/*
-        echo "cleaning done! Starting backup"
-        innobackupex $ARGS $BACKUP_DIR/FULL
-        date
-        echo "backup done!" #, now uncompressing the files..."
-#        for bf in `find $BACKUP_DIR/FULL -iname "*\.qp"`; do qpress -d $bf $(dirname $bf) ;echo "processing" $bf; rm $bf; done
-#        date
-#        echo "uncompressing done!, preparing the backup for restore..."
-#        innobackupex --apply-log --redo-only $BACKUP_DIR/FULL
-#        date
-#        echo "preparation done!"
+    fi
+    
+    rm -rf $BACKUP_DIR/*
+    echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Cleanup the backup folder is done! Starting backup" >> $BACKUP_DIR/xtrabackup.log
+    
+    xtrabackup --backup -u sqladmin -p --history --compress --slave-info --compress-threads=4 --target-dir=$BACKUP_DIR/FULL
+    echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Backup Done!" >> $BACKUP_DIR/xtrabackup.log
 }
 
 incremental_backup()
 {
-        if [ ! -d $BACKUP_DIR/FULL ]
-        then
-                echo "ERROR: no full backup has been done before. aborting"
-                exit -1
-        fi
+    if [ ! -d $BACKUP_DIR/FULL ]
+    then
+        echo "ERROR: Unable to find the FULL Backup. aborting....."
+        exit -1
+    fi
 
-        #we need the incremental number
-        if [ ! -f $BACKUP_DIR/last_incremental_number ]; then
-            NUMBER=1
-        else
-            NUMBER=$(($(cat $BACKUP_DIR/last_incremental_number) + 1))
-        fi
-        date
-        echo "doing incremental number $NUMBER"
-        if [ $NUMBER -eq 1 ]
-        then
-                innobackupex $ARGS --incremental $BACKUP_DIR/inc$NUMBER --incremental-basedir=$BACKUP_DIR/FULL 
-        else
-                innobackupex $ARGS --incremental $BACKUP_DIR/inc$NUMBER --incremental-basedir=$BACKUP_DIR/inc$(($NUMBER - 1)) 
-        fi
-        date
-        echo $NUMBER > $BACKUP_DIR/last_incremental_number
-        echo "incremental $NUMBER done!" #, now uncompressing the files..."
-#        for bf in `find $BACKUP_DIR/inc$NUMBER -iname "*\.qp"`; do qpress -d $bf $(dirname $bf) ;echo "processing" $bf; rm $bf; done
-#        date
-#        echo "uncompressing done!, the preparation will be made when the restore is needed"
+    if [ ! -f $BACKUP_DIR/last_incremental_number ]; then
+        NUMBER=1
+    else
+        NUMBER=$(($(cat $BACKUP_DIR/last_incremental_number) + 1))
+    fi
+    
+    echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Starting Incremental backup $NUMBER" >> $BACKUP_DIR/xtrabackup.log
+    if [ $NUMBER -eq 1 ]
+    then
+        xtrabackup --backup  --history --slave-info --incremental --target-dir=$BACKUP_DIR/inc$NUMBER --incremental-basedir=$BACKUP_DIR/FULL 
+    else
+        xtrabackup --backup  --history --slave-info --incremental --target-dir=$BACKUP_DIR/inc$NUMBER --incremental-basedir=$BACKUP_DIR/inc$(($NUMBER - 1)) 
+    fi
+
+    echo $NUMBER > $BACKUP_DIR/last_incremental_number
+    echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Incremental Backup:$NUMBER done!"  >> $BACKUP_DIR/xtrabackup.log
 }
 
 restore()
 {
-        echo "WARNING: are you sure this is what you want to do? (Enter 1 or 2)"
-        select yn in "Yes" "No"; do
-            case $yn in
-                Yes ) break;;
-                No ) echo "aborting... that was close."; exit;;
-            esac
-        done
+    echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Decompressing the FULL backup" >> $BACKUP_DIR/xtrabackup-restore.log
+    xtrabackup --decompress --remove-original --parallel=4 --target-dir=$BACKUP_DIR/FULL 
+    echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Decompressing Done !!!" >> $BACKUP_DIR/xtrabackup-restore.log
+    
+    echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Prepareing FULL Backup ..." >> $BACKUP_DIR/xtrabackup-restore.log
+    xtrabackup --prepare  --apply-log-only --target-dir=$BACKUP_DIR/FULL 
+    echo `date '+%Y-%m-%d %H:%M:%S:%s'`": FULL Backup Preparation Done!!!" >> $BACKUP_DIR/xtrabackup-restore.log
 
-        echo "cross your fingers :)"
-        date
-        echo "decompressing full backup"
-        innobackupex --decompress $BACKUP_DIR/FULL 
-    echo "doing restore..."
-        innobackupex --apply-log --redo-only $BACKUP_DIR/FULL 
+    
+    P=1
+    while [ -d $BACKUP_DIR/inc$P ] && [ -d $BACKUP_DIR/inc$(($P+1)) ]
+    do
+        echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Decompressing incremental:$P" >> $BACKUP_DIR/xtrabackup-restore.log
+        xtrabackup --decompress --remove-original --parallel=4 --target-dir=$BACKUP_DIR/inc$P 
+        echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Decompressing incremental:$P Done !!!" >> $BACKUP_DIR/xtrabackup-restore.log
+        
+        echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Prepareing incremental:$P"  >> $BACKUP_DIR/xtrabackup-restore.log
+        xtrabackup --prepare --apply-log-only --target-dir=$BACKUP_DIR/FULL --incremental-dir=$BACKUP_DIR/inc$P 
+        echo `date '+%Y-%m-%d %H:%M:%S:%s'`": incremental:$P Preparation Done!!!" >> $BACKUP_DIR/xtrabackup-restore.log
+        P=$(($P+1))
+    done
 
-        #we append all the increments
-        P=1
-        while [ -d $BACKUP_DIR/inc$P ] && [ -d $BACKUP_DIR/inc$(($P+1)) ]
-        do
-              echo "decompressing incremental $P"
-          innobackupex --decompress $BACKUP_DIR/inc$P 
-              echo "processing incremental $P"
-              innobackupex --apply-log --redo-only $BACKUP_DIR/FULL --incremental-dir=$BACKUP_DIR/inc$P 
-              P=$(($P+1))
-        done
+    if [ -d $BACKUP_DIR/inc$P ]
+    then
+        echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Decompressing the last incremental:$P" >> $BACKUP_DIR/xtrabackup-restore.log
+        xtrabackup --decompress --remove-original --parallel=4 --target-dir=$BACKUP_DIR/inc$P 
+        echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Decompressing the last incremental:$P Done !!!" >> $BACKUP_DIR/xtrabackup-restore.log
+        
+        echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Prepareing the last incremental:$P"  >> $BACKUP_DIR/xtrabackup-restore.log
+        xtrabackup --prepare --target-dir=$BACKUP_DIR/FULL --incremental-dir=$BACKUP_DIR/inc$P 
+        echo `date '+%Y-%m-%d %H:%M:%S:%s'`": Last incremental:$P Preparation Done!!!" >> $BACKUP_DIR/xtrabackup-restore.log
+    fi
 
-        if [ -d $BACKUP_DIR/inc$P ]
-        then
-        #the last incremental has to be applied without the redo-only flag
-        echo "decompressing incremental $P"
-                innobackupex --decompress $BACKUP_DIR/inc$P 
-                echo "processing last incremental $P"
-                innobackupex --apply-log $BACKUP_DIR/FULL --incremental-dir=$BACKUP_DIR/inc$P 
-        fi
-
-        #we prepare the full
-        innobackupex --apply-log $BACKUP_DIR/FULL 
-
-        #finally we copy the folder
-        cp -r $DATA_DIR $DATA_DIR.back
-        rm -rf $DATA_DIR/*
-        innobackupex --copy-back $BACKUP_DIR/FULL 
-
-        chown -R mysql:mysql $DATA_DIR
 }
 
 #######################################
